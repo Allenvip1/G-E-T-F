@@ -11,7 +11,7 @@
 """
 import csv, html, json, re, subprocess, sys, urllib.request, zipfile, io
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -160,6 +160,29 @@ def update_price(fname, sym):
 
 
 # ───────── 内嵌 ─────────
+def log_seen():
+    """记录官网"首次看到新数据"的时间（用来摸清官网每天几点更新）。"""
+    p = DATA / "seen_log.csv"
+    rows = read_csv(p)
+    last = {}
+    for r in rows:
+        last[r["source"]] = max(last.get(r["source"], ""), r["data_date"])
+    now = datetime.now(timezone.utc)
+    bj = now.astimezone(timezone(timedelta(hours=8)))
+    for src, f in (("GLD", "gld.csv"), ("SLV", "slv.csv")):
+        rs = read_csv(DATA / f)
+        if not rs:
+            continue
+        latest = max(r["date"] for r in rs)
+        if latest > last.get(src, ""):
+            rows.append({"source": src, "data_date": latest, "first_seen_utc": now.strftime("%Y-%m-%d %H:%M"),
+                         "first_seen_beijing": bj.strftime("%Y-%m-%d %H:%M"),
+                         "note": "" if last.get(src) else "初始记录（非首次看到时间）"})
+            print(f"{src} 新数据 {latest}，首次看到 北京时间 {bj:%Y-%m-%d %H:%M}")
+    write_csv(p, ["source", "data_date", "first_seen_utc", "first_seen_beijing", "note"],
+              [[r["source"], r["data_date"], r["first_seen_utc"], r["first_seen_beijing"], r.get("note", "")] for r in rows])
+
+
 def embed():
     def price(f):
         return [[r["date"], float(r["open"]), float(r["high"]), float(r["low"]), float(r["close"])] for r in read_csv(DATA / f) if r["date"] >= EMBED_FROM]
@@ -168,8 +191,13 @@ def embed():
     data = {"updated": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
             "gold": {"price": price("price_gold.csv"), "etf": gld},
             "silver": {"price": price("price_silver.csv"), "etf": slv}}
-    blob = json.dumps(data, separators=(",", ":")).replace("</", "<\\/")
     html_ = PAGE.read_text(encoding="utf-8")
+    # 数据没变化时保持原来的"更新于"时间，避免每次定时运行都产生无意义的提交
+    m0 = re.search(r'<script id="etf-data">window[.]ETF_DATA=(.*?);</script>', html_, re.S)
+    old = json.loads(m0.group(1)) if m0 and m0.group(1) != "null" else None
+    strip = lambda d: {k: v for k, v in d.items() if k != "updated"}
+    data["updated"] = old["updated"] if old and strip(old) == strip(data) else datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    blob = json.dumps(data, separators=(",", ":")).replace("</", "<\\/")
     new, n = re.subn(r'(<script id="etf-data">).*?(</script>)', lambda m: m.group(1) + "window.ETF_DATA=" + blob + ";" + m.group(2), html_, count=1, flags=re.S)
     if not n:
         sys.exit("index.html 里没有 etf-data 标签")
@@ -184,6 +212,7 @@ def main():
             fn(*args)
         except Exception as e:
             print(f"[警告] {fn.__name__} 失败，沿用旧数据：{e}", file=sys.stderr)
+    log_seen()
     embed()
 
 
