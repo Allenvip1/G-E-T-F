@@ -20,6 +20,7 @@ PAGE = ROOT / "index.html"
 UA = "Mozilla/5.0"
 OZ_PER_TONNE = 32150.7466
 OZ_PER_SHARE = 492910352.50 / 545800000   # 2026-10-06 官网 Ounces in Trust ÷ 当日流通份额
+REBUILD_SILVER = "--rebuild-silver" in sys.argv
 EMBED_FROM = "2016-01-01"   # 页面内嵌的起始日期（CSV 保留全部历史）
 
 GLD_URL = "https://api.spdrgoldshares.com/api/v1/historical-archive?product=gld&exchange=NYSE&lang=en"
@@ -133,30 +134,93 @@ def slv_tonnes():
 
 
 # ───────── 价格 ─────────
-def update_price(fname, sym):
-    p = DATA / fname
+MONTH_CODES = "FGHJKMNQUVXZ"   # 1~12 月的期货月份代码
+OVERWRITE_DAYS = 7              # 白银每次只覆盖最近这几天
+
+
+def yahoo_rows(sym, rng="10y", with_volume=False):
+    """Yahoo 日线 -> [[日期, 开, 高, 低, 收(, 量)], ...]；同一天只保留第一条（末尾常多一条盘中/新交易日报价行）。"""
+    err = None
     for host in ("query1.finance.yahoo.com", "query2.finance.yahoo.com"):
         try:
-            res = json.loads(get(YAHOO.format(host=host, sym=sym)))["chart"]["result"][0]
+            res = json.loads(get(f"https://{host}/v8/finance/chart/{sym}?range={rng}&interval=1d"))["chart"]["result"]
+            if not res:
+                raise ValueError("Yahoo 没有这个代码的数据")
+            res = res[0]
             break
         except Exception as e:
             err = e
     else:
-        print(f"[警告] {sym} 抓取失败，沿用旧文件：{err}", file=sys.stderr); return
+        raise RuntimeError(err)
     off, q = res["meta"]["gmtoffset"], res["indicators"]["quote"][0]
-    rows = []
+    seen = {}
     for i, t in enumerate(res["timestamp"]):
         if None in (q["open"][i], q["high"][i], q["low"][i], q["close"][i]): continue
         d = datetime.fromtimestamp(t + off, timezone.utc).date().isoformat()
-        rows.append([d] + [round(q[k][i], 2) for k in ("open", "high", "low", "close")])
+        row = [d] + [round(q[k][i], 2) for k in ("open", "high", "low", "close")]
+        if with_volume: row.append(q["volume"][i] or 0)
+        seen.setdefault(d, row)
+    return sorted(seen.values())
+
+
+def update_price(fname, sym):
+    p = DATA / fname
+    try:
+        rows = yahoo_rows(sym)
+    except Exception as e:
+        print(f"[警告] {sym} 抓取失败，沿用旧文件：{e}", file=sys.stderr); return
     if len(rows) < 500:
         print(f"[警告] {sym} 只取到 {len(rows)} 行，沿用旧文件", file=sys.stderr); return
-    seen = {}
-    for r in rows:   # Yahoo 末尾常多出一条同日的盘中/新交易日报价行：同一天只保留第一条（完整日线）
-        seen.setdefault(r[0], r)
-    rows = list(seen.values())
-    write_csv(p, ["date", "open", "high", "low", "close"], sorted(rows))
+    write_csv(p, ["date", "open", "high", "low", "close"], rows)
     print(f"{sym}: {len(rows)} 天，最新 {rows[-1][0]}")
+
+
+def pick_silver_contract():
+    """在未来 14 个月的白银合约里，挑最近 10 个交易日成交量最大的一个。"""
+    today = datetime.now(timezone.utc).date()
+    best, best_vol = None, -1
+    for k in range(0, 14):
+        y, m = divmod(today.year * 12 + today.month - 1 + k, 12)
+        sym = f"SI{MONTH_CODES[m]}{str(y)[-2:]}.CMX"
+        try:
+            rows = yahoo_rows(sym, "1mo", with_volume=True)
+        except Exception:
+            continue                   # 这个月份没有合约，跳过
+        vol = sum(r[5] for r in rows[-10:])
+        if vol > best_vol:
+            best, best_vol = sym, vol
+    if not best or best_vol <= 0:
+        raise RuntimeError("没有找到有成交量的白银合约")
+    print(f"白银主力合约：{best}（最近 10 日成交量 {best_vol}）")
+    return best
+
+
+def update_silver_price(rebuild=False):
+    """白银：Yahoo 的 SI=F（近月连续）在非主力月份有大量 O=H=L=C 的一字线，所以改用成交量最大的具体合约。
+    每次只覆盖最近 7 天并补新日期，已存历史不改（主力换月当天新旧合约有一点价差，不做复权）。
+    首次迁移用 --rebuild-silver：所选合约"最后一根一字线"之前的日期保留原有 SI=F 行。"""
+    p = DATA / "price_silver.csv"
+    try:
+        sym = pick_silver_contract()
+        raw = yahoo_rows(sym, "2y", with_volume=True)
+    except Exception as e:
+        print(f"[警告] 白银主力合约抓取失败，沿用旧文件：{e}", file=sys.stderr); return
+    last_flat = max((i for i, r in enumerate(raw) if r[1] == r[2] == r[3] == r[4]), default=-1)
+    new = [r[:5] for r in raw[last_flat + 1:]]
+    if len(new) < 100:
+        print(f"[警告] {sym} 可用数据只有 {len(new)} 行，沿用旧文件", file=sys.stderr); return
+    old = [[r["date"], float(r["open"]), float(r["high"]), float(r["low"]), float(r["close"])] for r in read_csv(p)]
+    if rebuild or not old:
+        merged = [r for r in old if r[0] < new[0][0]] + new
+    else:
+        cutoff = (datetime.now(timezone.utc).date() - timedelta(days=OVERWRITE_DAYS)).isoformat()
+        have = {r[0]: r for r in old}
+        for r in new:
+            if r[0] >= cutoff or r[0] not in have:
+                have[r[0]] = r
+        merged = sorted(have.values())
+    write_csv(p, ["date", "open", "high", "low", "close"], merged)
+    print(f"{sym}: {len(merged)} 天，最新 {merged[-1][0]}")
 
 
 # ───────── 内嵌 ─────────
@@ -207,7 +271,7 @@ def embed():
 
 def main():
     DATA.mkdir(exist_ok=True)
-    for fn, args in ((update_gld, ()), (update_slv, ()), (update_price, ("price_gold.csv", "GC=F")), (update_price, ("price_silver.csv", "SI=F"))):
+    for fn, args in ((update_gld, ()), (update_slv, ()), (update_price, ("price_gold.csv", "GC=F")), (update_silver_price, (REBUILD_SILVER,))):
         try:
             fn(*args)
         except Exception as e:
