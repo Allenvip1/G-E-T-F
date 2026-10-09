@@ -218,7 +218,7 @@ def yahoo_sessions(sym, rng="7d"):
 def fix_latest_rows(rows, sym):
     """Yahoo 日线有个毛病：美东 18:00 新交易日开盘之后到午夜之前，最后一根日线是"新交易日刚开盘的几个小时"，
     却贴着刚结束那一天的日期，把那天完整的日线顶替掉了（北京时间约 06:00~12:00 抓取就会撞上）。
-    这里用小时线合成的交易日来识别并修复：某天的日线若与"下一个交易日"的小时线合成结果一致，就判定被污染，
+    这里用小时线合成的交易日来识别并修复：某天的日线若开盘价等于"下一个交易日"的开盘价（而不是自己的开盘价），就判定被污染，
     改用该日自己的小时线合成值；日线里缺失的完整交易日也用小时线补上。小时线抓不到时原样返回。"""
     try:
         sess = yahoo_sessions(sym)
@@ -226,12 +226,11 @@ def fix_latest_rows(rows, sym):
         print(f"[警告] {sym} 小时线抓取失败，最后一根日线可能不准：{e}", file=sys.stderr)
         return rows
     by = {r[0]: list(r) for r in rows}
-    close = lambda a, b: all(abs(x - y) <= 0.011 for x, y in zip(a, b))
     fixed = []
     for i, (d, ohlc, n) in enumerate(sess):
         row = by.get(d)
         nxt = sess[i + 1][1] if i + 1 < len(sess) else None
-        corrupted = bool(row and nxt and close(row[1:4], nxt[:3]))
+        corrupted = bool(row and nxt and abs(row[1] - nxt[0]) <= 0.011 and abs(row[1] - ohlc[0]) > 0.011)   # 日线的开盘价 = 下一个交易日的开盘价、且不是自己的开盘价
         if (corrupted or row is None) and n >= 20:
             by[d] = [d] + ohlc
             fixed.append(d)
