@@ -24,6 +24,9 @@ REBUILD_SILVER = "--rebuild-silver" in sys.argv
 EMBED_FROM = "2016-01-01"   # 页面内嵌的起始日期（CSV 保留全部历史）
 
 GLD_URL = "https://api.spdrgoldshares.com/api/v1/historical-archive?product=gld&exchange=NYSE&lang=en"
+# 官网 GLD 页面"Trust Information"用的实时接口：当个交易日的总吨数美东 16:45 前后就更新（北京次日凌晨），
+# 比历史档案 xlsx 早很多（xlsx 要等收盘价、成交量等都出齐，约美东 22:30 即北京次日 10:30 之后才有这一天）。
+GLD_LIVE_URL = "https://api.spdrgoldshares.com/api/v1/data?product=gld&exchange=NYSE&lang=en"
 SLV_PAGE = "https://www.ishares.com/us/products/239855/ishares-silver-trust-fund"
 SLV_DOC = ("https://www.blackrock.com/varnish-api/blk-one01-product-data/product-data/api/v1/get-fund-document"
            "?appType=PRODUCT_PAGE&appSubType=ISHARES&targetSite=us-ishares&locale=en_US&portfolioId=239855"
@@ -89,8 +92,27 @@ def fetch_gld():
     return sorted(out)
 
 
+def num(x):
+    return float(re.sub(r"[^0-9.\-]", "", x))
+
+
+def fetch_gld_live():
+    """官网页面接口 -> [日期, 收盘价, 每股净值, 总盎司, 总吨数]；日期取总吨数那一项自带的日期。"""
+    d = json.loads(get(GLD_LIVE_URL))["data"]
+    day = datetime.strptime(d["total_tonnes"]["date"], "%B %d, %Y").date().isoformat()
+    return [day, round(num(d["close_usd"]["value"]), 4), round(num(d["nav_share_usd"]["value"]), 4),
+            round(num(d["total_ounces"]["value"]), 2), round(num(d["total_tonnes"]["value"]), 2)]
+
+
 def update_gld():
     rows = fetch_gld()
+    try:
+        live = fetch_gld_live()
+        if live[0] > rows[-1][0]:      # 档案里还没有这一天：先用页面接口的数据补上；档案之后更新了会自动覆盖
+            rows.append(live)
+            print(f"GLD 页面接口比历史档案新：补入 {live[0]}  {live[4]} 吨")
+    except Exception as e:
+        print(f"[警告] GLD 页面接口失败（只用历史档案）：{e}", file=sys.stderr)
     write_csv(DATA / "gld.csv", ["date", "close", "nav", "ounces", "tonnes"], rows)
     print(f"GLD: {len(rows)} 天，最新 {rows[-1][0]}  {rows[-1][4]} 吨")
 
