@@ -185,6 +185,63 @@ def yahoo_rows(sym, rng="10y", with_volume=False):
     return sorted(seen.values())
 
 
+def yahoo_sessions(sym, rng="7d"):
+    """用 Yahoo 小时线合成"交易日"：COMEX 期货每个交易日从前一天美东 18:00 到当天 17:00。
+    返回按日期排序的 [(日期, [开, 高, 低, 收], 小时线根数)]。"""
+    err = None
+    for host in ("query1.finance.yahoo.com", "query2.finance.yahoo.com"):
+        try:
+            res = json.loads(get(f"https://{host}/v8/finance/chart/{sym}?range={rng}&interval=1h"))["chart"]["result"]
+            if not res:
+                raise ValueError("Yahoo 没有这个代码的小时线")
+            res = res[0]
+            break
+        except Exception as e:
+            err = e
+    else:
+        raise RuntimeError(err)
+    off, q = res["meta"]["gmtoffset"], res["indicators"]["quote"][0]
+    sess = {}
+    for i, t in enumerate(res["timestamp"]):
+        if None in (q["open"][i], q["high"][i], q["low"][i], q["close"][i]): continue
+        et = datetime.fromtimestamp(t + off, timezone.utc)            # 交易所本地时间
+        day = (et + timedelta(hours=6)).date()                        # 18:00 起算下一个交易日
+        if day.weekday() >= 5: continue                               # 周五 18:00 之后到周日 18:00 休市
+        r = sess.get(day.isoformat())
+        if r is None:
+            sess[day.isoformat()] = [q["open"][i], q["high"][i], q["low"][i], q["close"][i], 1]
+        else:
+            r[1] = max(r[1], q["high"][i]); r[2] = min(r[2], q["low"][i]); r[3] = q["close"][i]; r[4] += 1
+    return [(d, [round(x, 2) for x in v[:4]], v[4]) for d, v in sorted(sess.items())]
+
+
+def fix_latest_rows(rows, sym):
+    """Yahoo 日线有个毛病：美东 18:00 新交易日开盘之后到午夜之前，最后一根日线是"新交易日刚开盘的几个小时"，
+    却贴着刚结束那一天的日期，把那天完整的日线顶替掉了（北京时间约 06:00~12:00 抓取就会撞上）。
+    这里用小时线合成的交易日来识别并修复：某天的日线若与"下一个交易日"的小时线合成结果一致，就判定被污染，
+    改用该日自己的小时线合成值；日线里缺失的完整交易日也用小时线补上。小时线抓不到时原样返回。"""
+    try:
+        sess = yahoo_sessions(sym)
+    except Exception as e:
+        print(f"[警告] {sym} 小时线抓取失败，最后一根日线可能不准：{e}", file=sys.stderr)
+        return rows
+    by = {r[0]: list(r) for r in rows}
+    close = lambda a, b: all(abs(x - y) <= 0.011 for x, y in zip(a, b))
+    fixed = []
+    for i, (d, ohlc, n) in enumerate(sess):
+        row = by.get(d)
+        nxt = sess[i + 1][1] if i + 1 < len(sess) else None
+        corrupted = bool(row and nxt and close(row[1:4], nxt[:3]))
+        if (corrupted or row is None) and n >= 20:
+            by[d] = [d] + ohlc
+            fixed.append(d)
+        elif corrupted:
+            del by[d]
+    if fixed:
+        print(f"{sym}: 用小时线修复了 {len(fixed)} 根被污染/缺失的日线 {fixed}")
+    return [by[k] for k in sorted(by)]
+
+
 def update_price(fname, sym):
     p = DATA / fname
     try:
@@ -193,6 +250,7 @@ def update_price(fname, sym):
         print(f"[警告] {sym} 抓取失败，沿用旧文件：{e}", file=sys.stderr); return
     if len(rows) < 500:
         print(f"[警告] {sym} 只取到 {len(rows)} 行，沿用旧文件", file=sys.stderr); return
+    rows = fix_latest_rows(rows, sym)
     write_csv(p, ["date", "open", "high", "low", "close"], rows)
     print(f"{sym}: {len(rows)} 天，最新 {rows[-1][0]}")
 
@@ -228,7 +286,7 @@ def update_silver_price(rebuild=False):
     except Exception as e:
         print(f"[警告] 白银主力合约抓取失败，沿用旧文件：{e}", file=sys.stderr); return
     last_flat = max((i for i, r in enumerate(raw) if r[1] == r[2] == r[3] == r[4]), default=-1)
-    new = [r[:5] for r in raw[last_flat + 1:]]
+    new = fix_latest_rows([r[:5] for r in raw[last_flat + 1:]], sym)
     if len(new) < 100:
         print(f"[警告] {sym} 可用数据只有 {len(new)} 行，沿用旧文件", file=sys.stderr); return
     old = [[r["date"], float(r["open"]), float(r["high"]), float(r["low"]), float(r["close"])] for r in read_csv(p)]
