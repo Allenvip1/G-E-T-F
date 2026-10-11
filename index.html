@@ -228,11 +228,9 @@ else {
   build(); setRange(12);
   const g = D.gold.etf, s = D.silver.etf;
   $("meta").innerHTML = `ETF 数据：GLD 截至 <b>${g[g.length - 1][0]}</b>，SLV 截至 <b>${s[s.length - 1][0]}</b> · 页面更新于 ${bjTime(D.updated)}`;
-  $("note").innerHTML = `数据来源：SPDR Gold Shares 官网历史档案（黄金总吨数）；iShares 官网（白银流通份额、产品页 Ounces in Trust）；价格为 Yahoo Finance 日线：黄金为 COMEX 连续合约 GC=F，白银为成交量最大的主力合约（Yahoo 的 SI=F 连续合约在非主力月份有大量一字线，所以不用；主力换月时会有小的价差跳空）。图上的顶 / 底为反转幅度 ≥ 所设百分比的之字形标记，带问号的是尚未确认的最新极值，仅供参考。<br>
-    白银吨数 = 流通份额 × 每股含银盎司（固定 0.9031，取自 2026-10-06 官网公布的 Ounces in Trust）÷ 32,150.75：每日变化只反映份额的申购/赎回；吨数绝对值有极小偏差。<br>
-    ETF 官网在美股收盘后公布当日数据，所以最新一天的 ETF 数据可能晚于价格。ETF 份额只在大额申购/赎回时才变，多日持平很正常。仅供研究，不构成投资建议。<br>
-    声明：本页数据来自上述公开来源，版权归原发布机构所有；本页仅供个人研究与学习，非商业用途，不构成任何投资建议。
-    图表由 <a href="https://tradingview.com" target="_blank" rel="noopener" style="color:#6ea8fe">TradingView</a> Lightweight Charts™ 提供。`;
+  $("note").innerHTML = `数据来源：SPDR Gold Shares 官网历史档案（黄金总吨数）；iShares 官网（白银流通份额、产品页 Ounces in Trust）；价格为 Yahoo Finance 日线<br>
+    图表由 <a href="https://tradingview.com" target="_blank" rel="noopener" style="color:#6ea8fe">TradingView</a> Lightweight Charts™ 提供。<br>
+    声明：本页数据来自上述公开来源，版权归原发布机构所有；本页仅供个人研究与学习，非商业用途，不构成任何投资建议。`;
 }
 </script>
 </body>
